@@ -3,48 +3,82 @@ from appwrite.services.databases import Databases
 from appwrite.services.storage import Storage
 from appwrite.id import ID
 from appwrite.input_file import InputFile
+from os import listdir, remove
+from os.path import isfile, join
+from PIL import Image, ImageOps
 import secret
 
+VALID_EXTENSIONS = {'jpg', 'png'}
 
-client = Client()
-client.set_endpoint('https://reatret.net/v1')
-client.set_project('6643f12100122b48edf9')
-client.set_key(secret.api_key)
+class AppWriteHelper:
+    def __init__(self, project_id):
+        client = Client()
+        client.set_endpoint('https://reatret.net/v1')
+        client.set_project(project_id)
+        client.set_key(secret.api_key)
+        self.project_id = project_id
+        self.databases = Databases(client)
+        self.storage = Storage(client)
 
-databases = Databases(client)
-storage = Storage(client)
+    def upload_file(self, bucket, file_path):
+        result = self.storage.create_file(
+            bucket_id = bucket,
+            file_id = ID.unique(),
+            file = InputFile.from_path(file_path),
+            permissions = ["read(\"any\")"] # optional
+        )
+        print(f'uploaded: {file_path}')
+        upload_id = result['$id']
+        return f'https://reatret.net/v1/storage/buckets/photos_thumbnail/files/{upload_id}/view?project={self.project_id}'
 
-storage = Storage(client)
+    def create_doc(self, data):
+        return self.databases.create_document(
+            database_id = 'photos',
+            collection_id = 'metadata',
+            document_id = ID.unique(),
+            data = data,
+            permissions = ["read(\"any\")"] # optional
+        )
 
-result = storage.create_file(
-    bucket_id = 'photos_thumbnail',
-    file_id = ID.unique(),
-    file = InputFile.from_path('homura.JPG'),
-    permissions = ["read(\"any\")"] # optional
-)
+def is_valid_file(file_path):
+    file_ext = file_path.split('.')[-1].lower()
+    return isfile(file_path) and (file_ext in VALID_EXTENSIONS)
 
-upload_id = result['$id']
-print(result)
+def main():
+    photo_folder_path = input("Image folder to upload: ")
+    client = AppWriteHelper('6643f12100122b48edf9')
+    photos_in_dir = [f for f in listdir(photo_folder_path) if is_valid_file(join(photo_folder_path, f))]
 
+    for photo in photos_in_dir:
+        full_path = f'{photo_folder_path}/{photo}'
+        thumbnail_path = f'{photo_folder_path}/thumbnail_{photo}'
+        image = Image.open(full_path)
+        image = ImageOps.exif_transpose(image)
+        width, height = image.size
+        # downsize the image with an LANCZOS filter (gives the highest quality)
+        resized = image.resize((width // 4, height // 4), Image.LANCZOS)
+        resized.save(thumbnail_path, quality=70, optimized=True)
 
-print(f'https://reatret.net/v1/storage/buckets/photos_thumbnail/files/{upload_id}/view?project=6643f12100122b48edf9')
+        full_url = client.upload_file('photos_full_res', full_path)
+        thumbnail_url = client.upload_file('photos_thumbnail', thumbnail_path)
 
-def createDoc():
-    result = databases.create_document(
-        database_id = 'photos',
-        collection_id = 'metadata',
-        document_id = ID.unique(),
-        data = {
-        'id': 'test',
-        'title': 'Title',
-        'description': 'desc.',
-        'photo_full_res_url' : 'h',
-        'width': 100,
-        'height': 100,
-        'full_res_url': 'https://media.istockphoto.com/id/1458782106/photo/scenic-aerial-view-of-the-mountain-landscape-with-a-forest-and-the-crystal-blue-river-in.jpg?s=612x612&w=is&k=20&c=FKTfwrl6zzuQUkwfonWJNXXVsHdlSnkdm1izsbCEf_E=',
-        'thumbnail_url': 'https://media.istockphoto.com/id/1458782106/photo/scenic-aerial-view-of-the-mountain-landscape-with-a-forest-and-the-crystal-blue-river-in.jpg?s=612x612&w=is&k=20&c=FKTfwrl6zzuQUkwfonWJNXXVsHdlSnkdm1izsbCEf_E='
-        },
-        permissions = ["read(\"any\")"] # optional
-    )
+        doc_id = input("ID: ")
+        title = input("Title: ")
+        desc = input("Description: ")
 
-    print(result)
+        result = client.create_doc(
+            {
+            'id': doc_id,
+            'title': title,
+            'description': desc,
+            'width': width,
+            'height': height,
+            'full_res_url': full_url,
+            'thumbnail_url': thumbnail_url
+            }
+        )
+        print(f'created doc: {result}\n\n')
+    print('done.')
+
+if __name__ == '__main__':
+    main()
