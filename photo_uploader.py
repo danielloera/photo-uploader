@@ -29,7 +29,7 @@ class AppWriteHelper:
         )
         print(f'uploaded: {file_path}')
         upload_id = result['$id']
-        return f'https://reatret.net/v1/storage/buckets/photos_thumbnail/files/{upload_id}/view?project={self.project_id}'
+        return f'https://reatret.net/v1/storage/buckets/{bucket}/files/{upload_id}/view?project={self.project_id}'
 
     def create_doc(self, data):
         return self.databases.create_document(
@@ -51,6 +51,8 @@ def main():
 
     for photo in photos_in_dir:
         full_path = f'{photo_folder_path}/{photo}'
+        full_url = client.upload_file('photos_full_res', full_path)
+
         thumbnail_path = f'{photo_folder_path}/thumbnail_{photo}'
         image = Image.open(full_path)
         image = ImageOps.exif_transpose(image)
@@ -59,7 +61,6 @@ def main():
         resized = image.resize((width // 4, height // 4), Image.LANCZOS)
         resized.save(thumbnail_path, quality=70, optimized=True)
 
-        full_url = client.upload_file('photos_full_res', full_path)
         thumbnail_url = client.upload_file('photos_thumbnail', thumbnail_path)
 
         doc_id = input("ID: ")
@@ -77,6 +78,7 @@ def main():
             'thumbnail_url': thumbnail_url
             }
         )
+        remove(thumbnail_path)
         print(f'created doc: {result}\n\n')
     print('done.')
 
