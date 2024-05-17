@@ -6,9 +6,11 @@ from appwrite.input_file import InputFile
 from os import listdir, remove
 from os.path import isfile, join
 from PIL import Image, ImageOps, ExifTags
+import argparse
 import secret
 
 VALID_EXTENSIONS = {'jpg', 'png'}
+IFD_CODE_LOOKUP = {i.value: i.name for i in ExifTags.IFD}
 
 class AppWriteHelper:
     def __init__(self, project_id):
@@ -40,13 +42,13 @@ class AppWriteHelper:
             permissions = ["read(\"any\")"] # optional
         )
 
-def nullable_float(val):
+def filter_float(val):
     return val if val is None else float(val)
 
-def nullable_str(val):
-    return val if val is None else str(val)
+def filter_str(val):
+    return val if val is None else str(val).replace(r'\u0000', '')
 
-def nullable_int(val):
+def filter_int(val):
     return val if val is None else int(val)
 
 def is_valid_file(file_path):
@@ -54,11 +56,8 @@ def is_valid_file(file_path):
     return isfile(file_path) and (file_ext in VALID_EXTENSIONS)
 
 def parse_exif(img_exif):
-    IFD_CODE_LOOKUP = {i.value: i.name for i in ExifTags.IFD}
     exif_map = {}
-
     for tag_code, value in img_exif.items():
-        # if the tag is an IFD block, nest into it
         if tag_code in IFD_CODE_LOOKUP:
             ifd_tag_name = IFD_CODE_LOOKUP[tag_code]
             exif_map[ifd_tag_name] = tag_code
@@ -70,8 +69,7 @@ def parse_exif(img_exif):
             exif_map[ExifTags.TAGS.get(tag_code)] = value
     return exif_map
 
-def main():
-    photo_folder_path = input("Image folder to upload: ")
+def main(photo_folder_path):
     client = AppWriteHelper('6643f12100122b48edf9')
     photos_in_dir = [f for f in listdir(photo_folder_path) if is_valid_file(join(photo_folder_path, f))]
 
@@ -84,11 +82,10 @@ def main():
         exif = parse_exif(image.getexif())
         image = ImageOps.exif_transpose(image)
         width, height = image.size
-        # downsize the image with an LANCZOS filter (gives the highest quality)
         resized = image.resize((width // 4, height // 4), Image.LANCZOS)
         resized.save(thumbnail_path, quality=70, optimized=True)
-
         thumbnail_url = client.upload_file('photos_thumbnail', thumbnail_path)
+        remove(thumbnail_path)
 
         doc_id = input("ID: ")
         title = input("Title: ")
@@ -103,21 +100,24 @@ def main():
             'height': height,
             'full_res_url': full_url,
             'thumbnail_url': thumbnail_url,
-            'shutter_speed': nullable_float(exif.get('ShutterSpeedValue', None)),
-            'focal_length': nullable_float(exif.get('FocalLength', None)),
-            'exposure_time': nullable_float(exif.get('ExposureTime', None)),
-            'f_number': nullable_float(exif.get('FNumber', None)),
-            'iso': nullable_int(exif.get('ISOSpeedRatings', None)),
-            'lens_make': nullable_str(exif.get('LensMake', None)),
-            'lens_model': nullable_str(exif.get('LensModel', None)),
-            'camera_make': nullable_str(exif.get('Make', None)),
-            'camera_model': nullable_str(exif.get('Model', None)),
-            'date': nullable_str(exif.get('DateTime', None)),
+            'shutter_speed': filter_float(exif.get('ShutterSpeedValue', None)),
+            'focal_length': filter_float(exif.get('FocalLength', None)),
+            'exposure_time': filter_float(exif.get('ExposureTime', None)),
+            'f_number': filter_float(exif.get('FNumber', None)),
+            'iso': filter_int(exif.get('ISOSpeedRatings', None)),
+            'lens_make': filter_str(exif.get('LensMake', None)),
+            'lens_model': filter_str(exif.get('LensModel', None)),
+            'camera_make': filter_str(exif.get('Make', None)),
+            'camera_model': filter_str(exif.get('Model', None)),
+            'date': filter_str(exif.get('DateTime', None)),
             }
         )
-        remove(thumbnail_path)
         print(f'created doc: {result}\n\n')
     print('done.')
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Upload photos to Appwrite.')
+    parser.add_argument('--photo_folder', type=str,
+                        help='Photo folder to upload.')
+    args = parser.parse_args()
+    main(args.photo_folder)
