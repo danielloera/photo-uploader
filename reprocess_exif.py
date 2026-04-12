@@ -10,17 +10,18 @@ Usage:
     python reprocess_exif.py --dry-run    # preview changes, no writes
     python reprocess_exif.py --file-id <id>           # single file
     python reprocess_exif.py --file-id <id> --dry-run
+
+NOTE: Uses tables_db.client.call() directly to bypass a bug in the installed
+Appwrite SDK where Row.$sequence is typed as str but the API returns an int,
+causing RowList.model_validate() to fail on any non-empty table.
 """
 
 import argparse
-import os
 import sys
-import tempfile
-import urllib.request
 from io import BytesIO
 
 from appwrite.client import Client
-from appwrite.services.databases import Databases
+from appwrite.services.tables_db import TablesDB
 from appwrite.services.storage import Storage
 from appwrite.query import Query
 from PIL import Image
@@ -36,18 +37,17 @@ except ImportError:
     print("ERROR: Could not import from photo_uploader.py — make sure it's in the same directory.")
     sys.exit(1)
 
-PROJECT_ID      = '6643f12100122b48edf9'
-ENDPOINT        = 'https://reatret.net/v1'
-BUCKET_ID       = 'photos_full_res'
-DATABASE_ID     = 'photos'
-COLLECTION_ID   = 'metadata'
-PAGE_LIMIT      = 100   # max items per Appwrite list call
+PROJECT_ID    = '6643f12100122b48edf9'
+ENDPOINT      = 'https://reatret.net/v1'
+BUCKET_ID     = 'photos_full_res'
+DATABASE_ID   = 'photos'
+TABLE_ID      = 'metadata'
+PAGE_LIMIT    = 100   # max items per Appwrite list call
 
 EXIF_FIELDS = [
     'shutter_speed', 'focal_length', 'exposure_time', 'f_number',
     'iso', 'lens_make', 'lens_model', 'camera_make', 'camera_model',
-    'date', 'gps_latitude', 'gps_longitude',
-    'width', 'height',
+    'date', 'width', 'height',
 ]
 
 
@@ -64,6 +64,52 @@ def make_client():
 
 
 # ---------------------------------------------------------------------------
+# Raw API helpers — bypass SDK Pydantic models entirely
+#
+# The installed SDK has type mismatches between its Pydantic models and what
+# the server actually returns (e.g. Row.$sequence declared str, sent as int;
+# File.encryption/compression declared required, not sent by server).
+# We call client.call() directly and work with plain dicts throughout.
+# ---------------------------------------------------------------------------
+
+def raw_list_rows(tables_db, queries=None):
+    """
+    Call the list-rows endpoint directly, returning the raw dict response.
+    Avoids RowList.model_validate() which crashes on the $sequence int/str mismatch.
+    """
+    api_path = f'/tablesdb/{DATABASE_ID}/tables/{TABLE_ID}/rows'
+    api_params = {}
+    if queries:
+        api_params['queries'] = queries
+    return tables_db.client.call('get', api_path, {}, api_params)
+
+
+def raw_update_row(tables_db, row_id, data):
+    """
+    Call the update-row endpoint directly, returning the raw dict response.
+    """
+    api_path = f'/tablesdb/{DATABASE_ID}/tables/{TABLE_ID}/rows/{row_id}'
+    return tables_db.client.call(
+        'patch',
+        api_path,
+        {'content-type': 'application/json'},
+        {'data': data},
+    )
+
+
+def raw_list_files(storage, bucket_id, queries=None):
+    """
+    Call the list-files endpoint directly, returning the raw dict response.
+    Avoids FileList.model_validate() which crashes on missing encryption/compression fields.
+    """
+    api_path = f'/storage/buckets/{bucket_id}/files'
+    api_params = {}
+    if queries:
+        api_params['queries'] = queries
+    return storage.client.call('get', api_path, {}, api_params)
+
+
+# ---------------------------------------------------------------------------
 # Pagination helpers
 # ---------------------------------------------------------------------------
 
@@ -75,7 +121,7 @@ def list_all_files(storage, bucket_id):
         queries = [Query.limit(PAGE_LIMIT)]
         if last_id:
             queries.append(Query.cursor_after(last_id))
-        page = storage.list_files(bucket_id=bucket_id, queries=queries)
+        page = raw_list_files(storage, bucket_id, queries=queries)
         batch = page.get('files', [])
         files.extend(batch)
         if len(batch) < PAGE_LIMIT:
@@ -84,48 +130,43 @@ def list_all_files(storage, bucket_id):
     return files
 
 
-def list_all_docs(databases, database_id, collection_id):
-    """Paginate through all documents in a collection."""
-    docs = []
+def list_all_rows(tables_db):
+    """Paginate through all rows in the metadata table, returning plain dicts."""
+    rows = []
     last_id = None
     while True:
         queries = [Query.limit(PAGE_LIMIT)]
         if last_id:
             queries.append(Query.cursor_after(last_id))
-        page = databases.list_documents(
-            database_id=database_id,
-            collection_id=collection_id,
-            queries=queries,
-        )
-        batch = page.get('documents', [])
-        docs.extend(batch)
+        page = raw_list_rows(tables_db, queries=[q for q in queries])
+        batch = page.get('rows', [])
+        rows.extend(batch)
         if len(batch) < PAGE_LIMIT:
             break
         last_id = batch[-1]['$id']
-    return docs
+    return rows
 
 
 # ---------------------------------------------------------------------------
-# Document index: file_id → doc
+# Row index: file_id → row dict
 # ---------------------------------------------------------------------------
 
-def build_doc_index(docs):
+def build_row_index(rows):
     """
-    Parse the file ID out of each document's full_res_url and return a
-    dict mapping  file_id → document.
+    Parse the file ID out of each row's full_res_url and return a
+    dict mapping  file_id → row dict.
 
     URL format:
       https://reatret.net/v1/storage/buckets/photos_full_res/files/<FILE_ID>/view?project=...
     """
     index = {}
-    for doc in docs:
-        url = doc.get('full_res_url', '')
+    for row in rows:
+        url = row.get('full_res_url', '') or ''
         try:
-            # Everything between '/files/' and '/view'
             file_id = url.split('/files/')[1].split('/')[0]
-            index[file_id] = doc
+            index[file_id] = row
         except (IndexError, AttributeError):
-            print(f"  [warn] could not parse file_id from URL: {url!r} (doc {doc['$id']})")
+            print(f"  [warn] could not parse file_id from URL: {url!r} (row {row.get('$id')})")
     return index
 
 
@@ -134,12 +175,8 @@ def build_doc_index(docs):
 # ---------------------------------------------------------------------------
 
 def download_file(storage, bucket_id, file_id):
-    """
-    Download a storage file and return it as a PIL Image.
-    Uses a NamedTemporaryFile so Pillow can open it safely.
-    """
+    """Download a storage file and return it as a PIL Image."""
     file_bytes = storage.get_file_download(bucket_id=bucket_id, file_id=file_id)
-    # Appwrite SDK returns bytes directly
     image = Image.open(BytesIO(file_bytes))
     image.load()   # force decode before BytesIO can be GC'd
     return image
@@ -149,11 +186,12 @@ def download_file(storage, bucket_id, file_id):
 # Core reprocess logic
 # ---------------------------------------------------------------------------
 
-def reprocess_file(file_id, doc, storage, databases, dry_run):
-    """Download one file, re-extract EXIF, and patch its document."""
+def reprocess_file(file_id, row, storage, tables_db, dry_run):
+    """Download one file, re-extract EXIF, and patch its row."""
+    row_id = row['$id']
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing file: {file_id}")
-    print(f"  doc_id : {doc['$id']}")
-    print(f"  title  : {doc.get('title', '(no title)')}")
+    print(f"  row_id : {row_id}")
+    print(f"  title  : {row.get('title') or '(no title)'}")
 
     # --- Download & parse ---
     try:
@@ -173,7 +211,7 @@ def reprocess_file(file_id, doc, storage, databases, dry_run):
     unchanged_fields = []
     for field in EXIF_FIELDS:
         new_val = meta.get(field)
-        old_val = doc.get(field)
+        old_val = row.get(field)
         if new_val != old_val:
             changed_fields[field] = {'old': old_val, 'new': new_val}
         else:
@@ -190,16 +228,11 @@ def reprocess_file(file_id, doc, storage, databases, dry_run):
     if unchanged_fields:
         print(f"  [same] {len(unchanged_fields)} field(s) unchanged: {', '.join(unchanged_fields)}")
 
-    # --- Patch document ---
+    # --- Patch row ---
     if not dry_run:
         try:
-            databases.update_document(
-                database_id=DATABASE_ID,
-                collection_id=COLLECTION_ID,
-                document_id=doc['$id'],
-                data={k: meta[k] for k in EXIF_FIELDS},
-            )
-            print(f"  [ok] document updated")
+            raw_update_row(tables_db, row_id, {k: meta[k] for k in EXIF_FIELDS})
+            print("  [ok] row updated")
         except Exception as e:
             print(f"  [error] update failed: {e}")
             return False
@@ -223,18 +256,18 @@ def main():
 
     client = make_client()
     storage = Storage(client)
-    databases = Databases(client)
+    tables_db = TablesDB(client)
 
     if args.dry_run:
-        print("=== DRY RUN MODE — no documents will be modified ===\n")
+        print("=== DRY RUN MODE — no rows will be modified ===\n")
 
-    # --- Fetch documents and build lookup index ---
-    print("Fetching documents from metadata collection...")
-    docs = list_all_docs(databases, DATABASE_ID, COLLECTION_ID)
-    print(f"  {len(docs)} document(s) found")
+    # --- Fetch rows and build lookup index ---
+    print("Fetching rows from metadata table...")
+    rows = list_all_rows(tables_db)
+    print(f"  {len(rows)} row(s) found")
 
-    doc_index = build_doc_index(docs)
-    print(f"  {len(doc_index)} document(s) indexed by file_id")
+    row_index = build_row_index(rows)
+    print(f"  {len(row_index)} row(s) indexed by file_id")
 
     # --- Determine which files to process ---
     if args.file_id:
@@ -251,13 +284,13 @@ def main():
     errors = 0
 
     for file_id in file_ids_to_process:
-        doc = doc_index.get(file_id)
-        if not doc:
-            print(f"\n[warn] no document found for file_id={file_id} — skipping")
+        row = row_index.get(file_id)
+        if not row:
+            print(f"\n[warn] no row found for file_id={file_id} — skipping")
             skipped += 1
             continue
 
-        success = reprocess_file(file_id, doc, storage, databases, dry_run=args.dry_run)
+        success = reprocess_file(file_id, row, storage, tables_db, dry_run=args.dry_run)
         if success:
             ok += 1
         else:

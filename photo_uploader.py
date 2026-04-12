@@ -210,10 +210,11 @@ def extract_metadata(exif):
 
     iso = filter_int(exif.get('ISOSpeedRatings') or exif.get('PhotographicSensitivity'))
 
-    gps_lat, gps_lon = parse_gps(exif)
-
     return {
-        'shutter_speed': filter_float(rational_to_float(exif.get('ShutterSpeedValue'))),
+        # Derived from the already-resolved exposure_time (ExposureTime →
+        # ShutterSpeedValue fallback), not ShutterSpeedValue directly —
+        # which is absent on many cameras, phones, and scanned film images.
+        'shutter_speed': filter_float(exposure_time),
         'focal_length': filter_float(focal_length),
         'exposure_time': filter_float(exposure_time),
         'f_number': filter_float(f_number),
@@ -223,8 +224,6 @@ def extract_metadata(exif):
         'camera_make': filter_str(exif.get('Make')),
         'camera_model': filter_str(exif.get('Model')),
         'date': filter_str(exif.get('DateTime') or exif.get('DateTimeOriginal')),
-        'gps_latitude': filter_float(gps_lat),
-        'gps_longitude': filter_float(gps_lon),
     }
 
 
