@@ -9,6 +9,7 @@ from PIL import Image, ImageOps, ExifTags
 from fractions import Fraction
 import argparse
 import math
+import subprocess
 import secret
 
 VALID_EXTENSIONS = {'jpg', 'png'}
@@ -16,7 +17,7 @@ IFD_CODE_LOOKUP = {i.value: i.name for i in ExifTags.IFD}
 
 
 class AppWriteHelper:
-    def __init__(self, project_id):
+    def __init__(self, project_id, debug=False):
         client = Client()
         client.set_endpoint('https://reatret.net/v1')
         client.set_project(project_id)
@@ -24,17 +25,52 @@ class AppWriteHelper:
         self.project_id = project_id
         self.databases = Databases(client)
         self.storage = Storage(client)
+        self.debug = debug
+        self.viewer_proc = None
+
+    def check_bucket(self, bucket_id):
+        if not self.debug:
+            return None
+        try:
+            bucket = self.storage.get_bucket(bucket_id)
+            print(f"  [debug] Bucket {bucket_id}: max file size = {bucket['maximumFileSize']}")
+            return bucket
+        except Exception as e:
+            print(f"  [debug] Could not get bucket {bucket_id}: {e}")
+            return None
 
     def upload_file(self, bucket, file_path):
-        result = self.storage.create_file(
-            bucket_id=bucket,
-            file_id=ID.unique(),
-            file=InputFile.from_path(file_path),
-            permissions=["read(\"any\")"]
-        )
-        print(f'uploaded: {file_path}')
-        upload_id = result['$id']
-        return f'https://reatret.net/v1/storage/buckets/{bucket}/files/{upload_id}/view?project={self.project_id}'
+        try:
+            result = self.storage.create_file(
+                bucket_id=bucket,
+                file_id=ID.unique(),
+                file=InputFile.from_path(file_path),
+                permissions=["read(\"any\")"]
+            )
+            print(f'uploaded: {file_path}')
+            upload_id = result['$id']
+            return f'https://reatret.net/v1/storage/buckets/{bucket}/files/{upload_id}/view?project={self.project_id}'
+        except Exception as e:
+            print(f'  [error] upload failed for {file_path}')
+            if self.debug:
+                if hasattr(e, 'message'):
+                    print(f'  [error] message: {e.message}')
+                if hasattr(e, 'response'):
+                    print(f'  [error] response: {e.response}')
+            raise e
+
+    def open_viewer(self, file_path):
+        """Open the image viewer for the given file, closing the previous one if it exists."""
+        if self.viewer_proc:
+            try:
+                self.viewer_proc.terminate()
+            except Exception:
+                pass
+        try:
+            self.viewer_proc = subprocess.Popen(['xdg-open', file_path])
+        except Exception as e:
+            if self.debug:
+                print(f"  [warn] Could not open image viewer: {e}")
 
     def create_doc(self, data):
         return self.databases.create_document(
@@ -234,13 +270,17 @@ def is_valid_file(file_path):
     return isfile(file_path) and (file_ext in VALID_EXTENSIONS)
 
 
-def main(photo_folder_path):
-    client = AppWriteHelper('6643f12100122b48edf9')
+def main(photo_folder_path, debug=False):
+    client = AppWriteHelper('6643f12100122b48edf9', debug=debug)
     photos_in_dir = [f for f in listdir(photo_folder_path) if is_valid_file(join(photo_folder_path, f))]
 
     for photo in photos_in_dir:
         full_path = f'{photo_folder_path}/{photo}'
         print(f'\nProcessing: {photo}')
+        
+        # Debug: check bucket settings
+        client.check_bucket('photos_full_res')
+        
         full_url = client.upload_file('photos_full_res', full_path)
 
         thumbnail_path = f'{photo_folder_path}/thumbnail_{photo}'
@@ -261,6 +301,9 @@ def main(photo_folder_path):
         if missing:
             print(f'  [exif] missing fields: {", ".join(missing)}')
         print(f'  [exif] extracted: {found}')
+
+        # Open the image for the user to see while entering details
+        client.open_viewer(full_path)
 
         doc_id = input("ID: ")
         title = input("Title: ")
@@ -284,5 +327,6 @@ def main(photo_folder_path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Upload photos to Appwrite.')
     parser.add_argument('--photo_folder', type=str, help='Photo folder to upload.')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging.')
     args = parser.parse_args()
-    main(args.photo_folder)
+    main(args.photo_folder, debug=args.debug)
