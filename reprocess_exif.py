@@ -24,7 +24,7 @@ from appwrite.client import Client
 from appwrite.services.tables_db import TablesDB
 from appwrite.services.storage import Storage
 from appwrite.query import Query
-from PIL import Image
+from PIL import Image, ImageOps
 
 import secret
 
@@ -200,6 +200,8 @@ def reprocess_file(file_id, row, storage, tables_db, dry_run):
         print(f"  [error] download failed: {e}")
         return False
 
+    # Handle EXIF orientation to get visual dimensions
+    image = ImageOps.exif_transpose(image)
     width, height = image.size
     exif = parse_exif(image)
     meta = extract_metadata(exif)
