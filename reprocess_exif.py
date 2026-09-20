@@ -193,6 +193,10 @@ def reprocess_file(file_id, row, storage, tables_db, dry_run):
     print(f"  row_id : {row_id}")
     print(f"  title  : {row.get('title') or '(no title)'}")
 
+    if row.get('is_film'):
+        print("  [skip] film photo (is_film=True) — skipping EXIF reprocessing")
+        return True
+
     # --- Download & parse ---
     try:
         image = download_file(storage, BUCKET_ID, file_id)

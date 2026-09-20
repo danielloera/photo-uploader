@@ -3,8 +3,11 @@ from appwrite.services.databases import Databases
 from appwrite.services.storage import Storage
 from appwrite.id import ID
 from appwrite.input_file import InputFile
+import os
 from os import listdir, remove
 from os.path import isfile, join
+from datetime import datetime
+import re
 from PIL import Image, ImageOps, ExifTags
 from fractions import Fraction
 import argparse
@@ -32,7 +35,12 @@ class AppWriteHelper:
         if not self.debug:
             return None
         try:
-            bucket = self.storage.get_bucket(bucket_id)
+            api_path = f'/storage/buckets/{bucket_id}'
+            bucket = self.storage.client.call(
+                'get',
+                api_path,
+                {'X-Appwrite-Project': self.project_id},
+            )
             print(f"  [debug] Bucket {bucket_id}: max file size = {bucket['maximumFileSize']}")
             return bucket
         except Exception as e:
@@ -41,11 +49,24 @@ class AppWriteHelper:
 
     def upload_file(self, bucket, file_path):
         try:
-            result = self.storage.create_file(
-                bucket_id=bucket,
-                file_id=ID.unique(),
-                file=InputFile.from_path(file_path),
-                permissions=["read(\"any\")"]
+            file_id = ID.unique()
+            api_path = f'/storage/buckets/{bucket}/files'
+            api_params = {
+                'fileId': file_id,
+                'file': InputFile.from_path(file_path),
+                'permissions': ["read(\"any\")"]
+            }
+            result = self.storage.client.chunked_upload(
+                api_path,
+                {
+                    'X-Appwrite-Project': self.project_id,
+                    'content-type': 'multipart/form-data',
+                    'accept': 'application/json',
+                },
+                api_params,
+                'file',
+                None,
+                file_id,
             )
             print(f'uploaded: {file_path}')
             upload_id = result['$id']
@@ -67,18 +88,30 @@ class AppWriteHelper:
             except Exception:
                 pass
         try:
-            self.viewer_proc = subprocess.Popen(['xdg-open', file_path])
+            if hasattr(os, 'startfile'):
+                os.startfile(file_path)
+            else:
+                self.viewer_proc = subprocess.Popen(['xdg-open', file_path])
         except Exception as e:
             if self.debug:
                 print(f"  [warn] Could not open image viewer: {e}")
 
     def create_doc(self, data):
-        return self.databases.create_document(
-            database_id='photos',
-            collection_id='metadata',
-            document_id=ID.unique(),
-            data=data,
-            permissions=["read(\"any\")"]
+        api_path = '/databases/photos/collections/metadata/documents'
+        api_params = {
+            'documentId': ID.unique(),
+            'data': data,
+            'permissions': ["read(\"any\")"]
+        }
+        return self.databases.client.call(
+            'post',
+            api_path,
+            {
+                'X-Appwrite-Project': self.project_id,
+                'content-type': 'application/json',
+                'accept': 'application/json',
+            },
+            api_params,
         )
 
 
@@ -265,12 +298,23 @@ def extract_metadata(exif):
 
 # ---------------------------------------------------------------------------
 
+def generate_id(title):
+    """
+    Create a lowercase alphanumeric and underscore ID based on the title.
+    Example: "Danny's picture" -> "dannys_picture"
+    """
+    cleaned = title.replace("'", "").replace("’", "")
+    cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned.lower().strip())
+    cleaned = cleaned.strip('_')
+    return cleaned if cleaned else str(ID.unique())
+
+
 def is_valid_file(file_path):
     file_ext = file_path.split('.')[-1].lower()
     return isfile(file_path) and (file_ext in VALID_EXTENSIONS)
 
 
-def main(photo_folder_path, debug=False):
+def main(photo_folder_path, is_film=None, debug=False):
     client = AppWriteHelper('6643f12100122b48edf9', debug=debug)
     photos_in_dir = [f for f in listdir(photo_folder_path) if is_valid_file(join(photo_folder_path, f))]
 
@@ -283,9 +327,18 @@ def main(photo_folder_path, debug=False):
         
         full_url = client.upload_file('photos_full_res', full_path)
 
+        # Open the image for the user to see while entering details
+        client.open_viewer(full_path)
+
+        if is_film is None:
+            is_film_input = input("Is this a film photo? (y/N): ").strip().lower()
+            photo_is_film = is_film_input in ('y', 'yes', 'true', '1')
+        else:
+            photo_is_film = bool(is_film)
+
         thumbnail_path = f'{photo_folder_path}/thumbnail_{photo}'
         image = Image.open(full_path)
-        exif = parse_exif(image)
+        exif = {} if photo_is_film else parse_exif(image)
         image = ImageOps.exif_transpose(image)
         width, height = image.size
         resized = image.resize((width // 4, height // 4), Image.LANCZOS)
@@ -293,32 +346,52 @@ def main(photo_folder_path, debug=False):
         thumbnail_url = client.upload_file('photos_thumbnail', thumbnail_path)
         remove(thumbnail_path)
 
-        meta = extract_metadata(exif)
+        if not photo_is_film:
+            meta = extract_metadata(exif)
 
-        # Show a quick summary of what was found
-        found = {k: v for k, v in meta.items() if v is not None}
-        missing = [k for k, v in meta.items() if v is None]
-        if missing:
-            print(f'  [exif] missing fields: {", ".join(missing)}')
-        print(f'  [exif] extracted: {found}')
+            # Show a quick summary of what was found
+            found = {k: v for k, v in meta.items() if v is not None}
+            missing = [k for k, v in meta.items() if v is None]
+            if missing:
+                print(f'  [exif] missing fields: {", ".join(missing)}')
+            print(f'  [exif] extracted: {found}')
 
-        # Open the image for the user to see while entering details
-        client.open_viewer(full_path)
-
-        doc_id = input("ID: ")
         title = input("Title: ")
         desc = input("Description: ")
+        doc_id = generate_id(title)
+        print(f'  ID: {doc_id}')
 
-        result = client.create_doc({
-            'id': doc_id,
-            'title': title,
-            'description': desc,
-            'width': width,
-            'height': height,
-            'full_res_url': full_url,
-            'thumbnail_url': thumbnail_url,
-            **meta,
-        })
+        if photo_is_film:
+            film_type_input = input("Film type: ").strip()
+            film_type = film_type_input if film_type_input else "Will update later"
+            current_date = datetime.now().strftime('%Y:%m:%d %H:%M:%S')
+
+            doc_data = {
+                'id': doc_id,
+                'title': title,
+                'description': desc,
+                'date': current_date,
+                'width': width,
+                'height': height,
+                'full_res_url': full_url,
+                'thumbnail_url': thumbnail_url,
+                'is_film': True,
+                'film_type': film_type,
+            }
+        else:
+            doc_data = {
+                'id': doc_id,
+                'title': title,
+                'description': desc,
+                'width': width,
+                'height': height,
+                'full_res_url': full_url,
+                'thumbnail_url': thumbnail_url,
+                'is_film': False,
+                **meta,
+            }
+
+        result = client.create_doc(doc_data)
         print(f'created doc: {result}\n')
 
     print('done.')
@@ -327,6 +400,17 @@ def main(photo_folder_path, debug=False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Upload photos to Appwrite.')
     parser.add_argument('--photo_folder', type=str, help='Photo folder to upload.')
+    parser.add_argument('--film', action='store_true', default=None, help='Upload photos as film photos.')
+    parser.add_argument('--is_film', action='store_true', dest='film', help='Alias for --film.')
+    parser.add_argument('--digital', action='store_true', help='Upload photos as digital photos (skip film prompt).')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging.')
     args = parser.parse_args()
-    main(args.photo_folder, debug=args.debug)
+
+    film_mode = None
+    if args.film:
+        film_mode = True
+    elif args.digital:
+        film_mode = False
+
+    main(args.photo_folder, is_film=film_mode, debug=args.debug)
+
