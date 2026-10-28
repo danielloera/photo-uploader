@@ -4,23 +4,22 @@ from appwrite.services.storage import Storage
 from appwrite.id import ID
 from appwrite.input_file import InputFile
 import os
-from os import listdir, remove
-from os.path import isfile, join
+from os import remove
+from os.path import isfile
 from datetime import datetime
 import re
 from PIL import Image, ImageOps, ExifTags
-from fractions import Fraction
 import argparse
 import math
-import subprocess
 import secret
 
-VALID_EXTENSIONS = {'jpg', 'png'}
+PROJECT_ID = '6643f12100122b48edf9'
+VALID_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 IFD_CODE_LOOKUP = {i.value: i.name for i in ExifTags.IFD}
 
 
 class AppWriteHelper:
-    def __init__(self, project_id, debug=False):
+    def __init__(self, project_id=PROJECT_ID, debug=False):
         client = Client()
         client.set_endpoint('https://reatret.net/v1')
         client.set_project(project_id)
@@ -29,7 +28,6 @@ class AppWriteHelper:
         self.databases = Databases(client)
         self.storage = Storage(client)
         self.debug = debug
-        self.viewer_proc = None
 
     def check_bucket(self, bucket_id):
         if not self.debug:
@@ -80,22 +78,6 @@ class AppWriteHelper:
                     print(f'  [error] response: {e.response}')
             raise e
 
-    def open_viewer(self, file_path):
-        """Open the image viewer for the given file, closing the previous one if it exists."""
-        if self.viewer_proc:
-            try:
-                self.viewer_proc.terminate()
-            except Exception:
-                pass
-        try:
-            if hasattr(os, 'startfile'):
-                os.startfile(file_path)
-            else:
-                self.viewer_proc = subprocess.Popen(['xdg-open', file_path])
-        except Exception as e:
-            if self.debug:
-                print(f"  [warn] Could not open image viewer: {e}")
-
     def create_doc(self, data):
         api_path = '/databases/photos/collections/metadata/documents'
         api_params = {
@@ -121,7 +103,7 @@ class AppWriteHelper:
 
 def filter_float(val):
     """Convert EXIF value to float, handling IFDRational, tuples, and APEX."""
-    if val is None:
+    if val is None or val == '':
         return None
     try:
         # IFDRational / Fraction — safe to cast directly
@@ -143,13 +125,13 @@ def filter_str(val):
 
 def filter_int(val):
     """Convert EXIF value to int, handling tuples (e.g. ISOSpeedRatings)."""
-    if val is None:
+    if val is None or val == '':
         return None
     try:
         # Some cameras write ISO as a tuple like (400,)
         if isinstance(val, (tuple, list)):
             val = val[0]
-        return int(val)
+        return int(float(val)) if isinstance(val, str) and '.' in val else int(val)
     except (TypeError, ValueError, IndexError):
         return None
 
@@ -296,6 +278,37 @@ def extract_metadata(exif):
     }
 
 
+def normalize_exif_payload(raw_exif):
+    """Normalize user-edited or extracted EXIF dictionary for Appwrite document creation."""
+    raw_exif = raw_exif or {}
+
+    def clean_str(val):
+        s = filter_str(val)
+        return s if s else None
+
+    exposure_time = filter_float(raw_exif.get('exposure_time'))
+    shutter_speed = filter_float(raw_exif.get('shutter_speed'))
+    if shutter_speed is None and exposure_time is not None:
+        shutter_speed = exposure_time
+    if exposure_time is None and shutter_speed is not None:
+        exposure_time = shutter_speed
+
+    return {
+        'shutter_speed': shutter_speed,
+        'focal_length': filter_float(raw_exif.get('focal_length')),
+        'exposure_time': exposure_time,
+        'f_number': filter_float(raw_exif.get('f_number')),
+        'iso': filter_int(raw_exif.get('iso')),
+        'lens_make': clean_str(raw_exif.get('lens_make')),
+        'lens_model': clean_str(raw_exif.get('lens_model')),
+        'camera_make': clean_str(raw_exif.get('camera_make')),
+        'camera_model': clean_str(raw_exif.get('camera_model')),
+        'date': clean_str(raw_exif.get('date')),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Photo inspection & publishing helpers
 # ---------------------------------------------------------------------------
 
 def generate_id(title):
@@ -303,114 +316,126 @@ def generate_id(title):
     Create a lowercase alphanumeric and underscore ID based on the title.
     Example: "Danny's picture" -> "dannys_picture"
     """
-    cleaned = title.replace("'", "").replace("’", "")
+    cleaned = (title or '').replace("'", "").replace("’", "")
     cleaned = re.sub(r'[^a-z0-9]+', '_', cleaned.lower().strip())
     cleaned = cleaned.strip('_')
     return cleaned if cleaned else str(ID.unique())
 
 
+def is_valid_extension(filename):
+    if '.' not in filename:
+        return False
+    file_ext = filename.rsplit('.', 1)[-1].lower()
+    return file_ext in VALID_EXTENSIONS
+
+
 def is_valid_file(file_path):
-    file_ext = file_path.split('.')[-1].lower()
-    return isfile(file_path) and (file_ext in VALID_EXTENSIONS)
+    return isfile(file_path) and is_valid_extension(file_path)
 
 
-def main(photo_folder_path, is_film=None, debug=False):
-    client = AppWriteHelper('6643f12100122b48edf9', debug=debug)
-    photos_in_dir = [f for f in listdir(photo_folder_path) if is_valid_file(join(photo_folder_path, f))]
+def inspect_photo(file_path):
+    """
+    Open an image file, extract its EXIF metadata and visual dimensions
+    (after EXIF orientation transpose).
+    """
+    with Image.open(file_path) as image:
+        exif = parse_exif(image)
+        meta = extract_metadata(exif)
+        transposed = ImageOps.exif_transpose(image)
+        width, height = transposed.size
+    return {
+        'width': width,
+        'height': height,
+        'exif': meta,
+    }
 
-    for photo in photos_in_dir:
-        full_path = f'{photo_folder_path}/{photo}'
-        print(f'\nProcessing: {photo}')
-        
-        # Debug: check bucket settings
-        client.check_bucket('photos_full_res')
-        
-        full_url = client.upload_file('photos_full_res', full_path)
 
-        # Open the image for the user to see while entering details
-        client.open_viewer(full_path)
+def publish_photo(client, file_path, metadata):
+    """
+    Upload full-res photo and generated 1/4 thumbnail to Appwrite storage,
+    then create the metadata document in Appwrite database.
+    """
+    client.check_bucket('photos_full_res')
+    full_url = client.upload_file('photos_full_res', file_path)
 
-        if is_film is None:
-            is_film_input = input("Is this a film photo? (y/N): ").strip().lower()
-            photo_is_film = is_film_input in ('y', 'yes', 'true', '1')
-        else:
-            photo_is_film = bool(is_film)
+    photo_is_film = bool(metadata.get('is_film', False))
+    folder_dir = os.path.dirname(file_path) or '.'
+    base_name = os.path.basename(file_path)
+    thumbnail_path = os.path.join(folder_dir, f'thumbnail_{base_name}')
 
-        thumbnail_path = f'{photo_folder_path}/thumbnail_{photo}'
-        image = Image.open(full_path)
-        exif = {} if photo_is_film else parse_exif(image)
-        image = ImageOps.exif_transpose(image)
-        width, height = image.size
-        resized = image.resize((width // 4, height // 4), Image.LANCZOS)
-        resized.save(thumbnail_path, quality=70, optimize=True)
+    try:
+        with Image.open(file_path) as image:
+            raw_exif = {} if photo_is_film else parse_exif(image)
+            transposed = ImageOps.exif_transpose(image)
+            width, height = transposed.size
+            resized = transposed.resize((max(1, width // 4), max(1, height // 4)), Image.LANCZOS)
+            resized.save(thumbnail_path, quality=70, optimize=True)
+
         thumbnail_url = client.upload_file('photos_thumbnail', thumbnail_path)
-        remove(thumbnail_path)
+    finally:
+        if os.path.exists(thumbnail_path):
+            try:
+                remove(thumbnail_path)
+            except OSError:
+                pass
 
-        if not photo_is_film:
-            meta = extract_metadata(exif)
+    title = (metadata.get('title') or '').strip()
+    desc = (metadata.get('description') or '').strip()
+    custom_doc_id = (metadata.get('doc_id') or '').strip()
+    doc_id = custom_doc_id if custom_doc_id else generate_id(title)
 
-            # Show a quick summary of what was found
-            found = {k: v for k, v in meta.items() if v is not None}
-            missing = [k for k, v in meta.items() if v is None]
-            if missing:
-                print(f'  [exif] missing fields: {", ".join(missing)}')
-            print(f'  [exif] extracted: {found}')
+    if photo_is_film:
+        film_type_input = (metadata.get('film_type') or '').strip()
+        film_type = film_type_input if film_type_input else "Will update later"
+        date_val = (metadata.get('date') or '').strip() or datetime.now().strftime('%Y:%m:%d %H:%M:%S')
 
-        title = input("Title: ")
-        desc = input("Description: ")
-        doc_id = generate_id(title)
-        print(f'  ID: {doc_id}')
-
-        if photo_is_film:
-            film_type_input = input("Film type: ").strip()
-            film_type = film_type_input if film_type_input else "Will update later"
-            current_date = datetime.now().strftime('%Y:%m:%d %H:%M:%S')
-
-            doc_data = {
-                'id': doc_id,
-                'title': title,
-                'description': desc,
-                'date': current_date,
-                'width': width,
-                'height': height,
-                'full_res_url': full_url,
-                'thumbnail_url': thumbnail_url,
-                'is_film': True,
-                'film_type': film_type,
-            }
+        doc_data = {
+            'id': doc_id,
+            'title': title,
+            'description': desc,
+            'date': date_val,
+            'width': width,
+            'height': height,
+            'full_res_url': full_url,
+            'thumbnail_url': thumbnail_url,
+            'is_film': True,
+            'film_type': film_type,
+        }
+    else:
+        if 'exif' in metadata and metadata['exif'] is not None:
+            meta = normalize_exif_payload(metadata['exif'])
         else:
-            doc_data = {
-                'id': doc_id,
-                'title': title,
-                'description': desc,
-                'width': width,
-                'height': height,
-                'full_res_url': full_url,
-                'thumbnail_url': thumbnail_url,
-                'is_film': False,
-                **meta,
-            }
+            meta = extract_metadata(raw_exif)
 
-        result = client.create_doc(doc_data)
-        print(f'created doc: {result}\n')
+        doc_data = {
+            'id': doc_id,
+            'title': title,
+            'description': desc,
+            'width': width,
+            'height': height,
+            'full_res_url': full_url,
+            'thumbnail_url': thumbnail_url,
+            'is_film': False,
+            **meta,
+        }
 
-    print('done.')
+    result = client.create_doc(doc_data)
+    print(f'created doc: {result}\n')
+    return {
+        'doc': result,
+        'doc_id': doc_id,
+        'full_res_url': full_url,
+        'thumbnail_url': thumbnail_url,
+        'data': doc_data,
+    }
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Upload photos to Appwrite.')
-    parser.add_argument('--photo_folder', type=str, help='Photo folder to upload.')
-    parser.add_argument('--film', action='store_true', default=None, help='Upload photos as film photos.')
-    parser.add_argument('--is_film', action='store_true', dest='film', help='Alias for --film.')
-    parser.add_argument('--digital', action='store_true', help='Upload photos as digital photos (skip film prompt).')
+    parser = argparse.ArgumentParser(description='reatret.net Photo Uploader Web UI')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Host interface for the Web UI (default: 127.0.0.1).')
+    parser.add_argument('--port', type=int, default=5000, help='Port for the Web UI (default: 5000).')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging.')
     args = parser.parse_args()
 
-    film_mode = None
-    if args.film:
-        film_mode = True
-    elif args.digital:
-        film_mode = False
-
-    main(args.photo_folder, is_film=film_mode, debug=args.debug)
-
+    from web_ui import run_server
+    run_server(host=args.host, port=args.port, debug=args.debug)

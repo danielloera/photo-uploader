@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>reatret.net Photo Uploader</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header>
+    <h1>reatret.net Photo Uploader</h1>
+    <div id="stagingStatus" class="staging-status"></div>
+  </header>
+
+  <div class="container">
+    <!-- Drag and Drop Zone -->
+    <div id="dropzone" class="dropzone">
+      <p><strong>Drag &amp; drop a folder or photos here</strong> (.jpg, .jpeg, .png)</p>
+      <div class="btn-group">
+        <button type="button" id="selectFolderBtn">Select Folder</button>
+        <button type="button" id="selectFilesBtn">Select Photos</button>
+      </div>
+      <input type="file" id="folderInput" class="hidden-input" webkitdirectory directory multiple />
+      <input type="file" id="filesInput" class="hidden-input" multiple accept=".jpg,.jpeg,.png" />
+    </div>
+
+    <!-- Batch Controls Toolbar -->
+    <div id="toolbar" class="toolbar">
+      <div class="toolbar-section">
+        <label>Batch Mode:</label>
+        <button type="button" id="batchDigitalBtn">Set All Digital</button>
+        <button type="button" id="batchFilmBtn">Set All Film</button>
+      </div>
+      <div class="toolbar-section">
+        <label for="batchFilmType">Batch Film Type:</label>
+        <input type="text" id="batchFilmType" placeholder="e.g. Kodak Gold 200" />
+        <button type="button" id="applyFilmTypeBtn">Apply to Film Photos</button>
+      </div>
+      <div class="toolbar-section">
+        <button type="button" id="clearAllBtn" class="btn-danger">Clear All</button>
+      </div>
+    </div>
+
+    <!-- Responsive Grid of Staged Photos -->
+    <div id="photoGrid" class="photo-grid"></div>
+  </div>
+
+  <!-- Publish Footer Bar -->
+  <div class="publish-bar">
+    <div id="progressInfo" class="progress-info">No photos staged.</div>
+    <button type="button" id="publishBtn" class="btn-primary" disabled>Publish All</button>
+  </div>
+
+  <!-- Image Lightbox Modal -->
+  <div id="lightbox" class="lightbox">
+    <img id="lightboxImg" src="" alt="Preview" />
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
