@@ -45,6 +45,22 @@ if [ "$TARGET_HOST" = "0.0.0.0" ]; then
 fi
 URL="http://${TARGET_HOST}:${PORT}"
 
+# If server is already running, open the browser window and exit cleanly
+if (echo > "/dev/tcp/${TARGET_HOST}/${PORT}") >/dev/null 2>&1; then
+  echo "Photo Uploader is already running at ${URL}."
+  echo "Opening in browser..."
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL" >/dev/null 2>&1
+  elif command -v open >/dev/null 2>&1; then
+    open "$URL" >/dev/null 2>&1
+  elif [ -x ".venv/bin/python" ]; then
+    .venv/bin/python -m webbrowser "$URL" >/dev/null 2>&1
+  else
+    python3 -m webbrowser "$URL" >/dev/null 2>&1
+  fi
+  exit 0
+fi
+
 # Automatically open browser window once server is ready
 (
   set +e

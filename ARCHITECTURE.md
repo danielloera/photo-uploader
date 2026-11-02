@@ -27,6 +27,7 @@ photo-uploader/
 ├── secret.py              # (Git-ignored) Appwrite API key configuration
 ├── requirements.txt       # Project dependencies (appwrite, Pillow, flask)
 ├── run.sh                 # Local launcher script (handles venv activation & execution)
+├── photo-uploader.desktop # Desktop entry launcher shortcut for KDE / FreeDesktop
 ├── templates/
 │   └── index.html         # Main UI markup
 └── static/

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Photo Uploader
+GenericName=Photo Uploader Web UI
+Comment=Upload and manage photos for reatret.net
+Exec=/home/danny/Projects/photo-uploader/run.sh
+Path=/home/danny/Projects/photo-uploader
+Icon=camera-photo
+Terminal=true
+Categories=Graphics;Photography;
+Keywords=photos;uploader;photography;reatret;
+StartupNotify=false
