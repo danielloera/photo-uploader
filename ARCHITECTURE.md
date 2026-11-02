@@ -123,6 +123,7 @@ A Flask application that handles local file lifecycle:
 ```bash
 ./run.sh
 ```
+Automatically ensures virtual environment dependencies are set up, starts the server, and opens the Web UI in your default browser at the expected local IP and port.
 
 ### Passing Options
 ```bash
